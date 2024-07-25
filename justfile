@@ -15,4 +15,6 @@ check arch toolchain:
     cargo +{{ toolchain }} b{{ arch }} --release --example async_server --features="async,esp-hal-embassy"
     cargo +{{ toolchain }} b{{ arch }} --release --example async_server_mTLS --features="async,esp-hal-embassy"
     cargo +{{ toolchain }} b{{ arch }} --release --example edge_server --features="async,esp-hal-embassy,edge-nal-embassy,edge-http,esp-mbedtls/edge-nal"
+    cargo +{{ toolchain }} b{{ arch }} --release --example edge_client --features="async,esp-hal-embassy,edge-nal-embassy,edge-http,esp-mbedtls/edge-nal"
+    cargo +{{ toolchain }} b{{ arch }} --release --example reqwless_client --features="async,esp-hal-embassy,embassy-net/dns,reqwless,esp-mbedtls/embedded-nal-async"
     cargo +{{ toolchain }} fmt --all -- --check

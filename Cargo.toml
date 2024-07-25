@@ -69,6 +69,9 @@ esp-mbedtls = { path = "./esp-mbedtls" }
 
 edge-http = { package = "edge-http", git = "https://github.com/ivmarkov/edge-net/", optional = true }
 edge-nal-embassy = { package = "edge-nal-embassy", git = "https://github.com/ivmarkov/edge-net/", optional = true }
+# TODO: Disable default features once esp-mbedtls support is up to date.
+# Currently, the default features enable embedded-tls which is needed to not throw a nourl::Error::UnsupportedScheme error
+reqwless = { version = "0.12.1", features = ["log"], optional = true }
 
 [[example]]
 name = "crypto_self_test"
@@ -92,7 +95,32 @@ required-features = ["async"]
 
 [[example]]
 name = "edge_server"
-required-features = ["async", "esp-hal-embassy", "edge-nal-embassy", "edge-http", "esp-mbedtls/edge-nal"]
+required-features = [
+    "async",
+    "esp-hal-embassy",
+    "edge-nal-embassy",
+    "edge-http",
+    "esp-mbedtls/edge-nal",
+]
+
+[[example]]
+name = "edge_client"
+required-features = [
+    "async",
+    "esp-hal-embassy",
+    "edge-nal-embassy",
+    "edge-http",
+    "esp-mbedtls/edge-nal",
+]
+
+[[example]]
+name = "reqwless_client"
+required-features = [
+    "async",
+    "embassy-net/dns",
+    "reqwless",
+    "esp-mbedtls/embedded-nal-async",
+]
 
 [features]
 esp32 = [

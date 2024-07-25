@@ -96,9 +96,9 @@ pub enum TlsError {
     X509MissingNullTerminator,
     /// The client has given no certificates for the request
     NoClientCertificate,
-    /// Errors from the edge-nal-embassy crate
-    #[cfg(feature = "edge-nal")]
-    TcpError(edge_nal_embassy::TcpError),
+    /// Errors from the edge-nal-embassy or the embedded-nal-async crate.
+    #[cfg(any(feature = "edge-nal", feature = "embedded-nal-async"))]
+    TcpError,
 }
 
 impl embedded_io::Error for TlsError {
@@ -965,7 +965,7 @@ pub mod asynch {
             }
 
             let buffer = core::slice::from_raw_parts_mut(buf as *mut u8, len as usize);
-            let max_len = usize::min(len as usize, (*session).rx_buffer.remaining());
+            let max_len = usize::min(len as usize, (*session).tx_buffer.remaining());
             let data = (*session).rx_buffer.pull(max_len);
             buffer[0..data.len()].copy_from_slice(data);
 
@@ -1101,6 +1101,98 @@ pub mod asynch {
         }
     }
 
+    #[cfg(any(feature = "edge-nal", feature = "embedded-nal-async"))]
+    pub struct TlsClient<'d, T, const N: usize> {
+        tcp: T,
+        host: &'d str,
+        version: TlsVersion,
+        certificates: Certificates<'d>,
+        owns_rsa: bool,
+    }
+
+    #[cfg(any(feature = "edge-nal", feature = "embedded-nal-async"))]
+    impl<'d, T, const N: usize> Drop for TlsClient<'d, T, N> {
+        fn drop(&mut self) {
+            unsafe {
+                // If the struct that owns the RSA reference is dropped
+                // we remove RSA in static for safety
+                if self.owns_rsa {
+                    log::debug!("Freeing RSA from acceptor");
+                    RSA_REF = core::mem::transmute(None::<RSA>);
+                }
+            }
+        }
+    }
+
+    #[cfg(any(feature = "edge-nal", feature = "embedded-nal-async"))]
+    impl<'d, T, const N: usize> TlsClient<'d, T, N> {
+        pub fn new(
+            tcp: T,
+            host: &'d str,
+            version: TlsVersion,
+            certificates: Certificates<'d>,
+        ) -> Self {
+            Self {
+                tcp,
+                host,
+                version,
+                certificates,
+                owns_rsa: false,
+            }
+        }
+
+        /// Enable the use of the hardware accelerated RSA peripheral for the lifetime of
+        /// [TlsAcceptor].
+        ///
+        /// # Arguments
+        ///
+        /// * `rsa` - The RSA peripheral from the HAL
+        pub fn with_hardware_rsa(mut self, rsa: impl Peripheral<P = RSA>) -> Self {
+            unsafe { RSA_REF = core::mem::transmute(Some(Rsa::new(rsa, None))) }
+            self.owns_rsa = true;
+            self
+        }
+    }
+
+    /// Implements embedded-nal-async traits
+    #[cfg(feature = "embedded-nal-async")]
+    pub use embedded_nal_compat::*;
+
+    #[cfg(feature = "embedded-nal-async")]
+    mod embedded_nal_compat {
+
+        use super::{AsyncConnectedSession, Session, TlsClient};
+        use crate::{Mode, TlsError};
+
+        impl<'d, T: embedded_nal_async::TcpConnect, const N: usize> embedded_nal_async::TcpConnect
+            for TlsClient<'d, T, N>
+        {
+            type Error = TlsError;
+            type Connection<'a> = AsyncConnectedSession<<T as embedded_nal_async::TcpConnect>::Connection<'a>, N> where Self: 'a;
+
+            async fn connect(
+                &self,
+                remote: embedded_nal_async::SocketAddr,
+            ) -> Result<Self::Connection<'_>, Self::Error> {
+                let socket = self
+                    .tcp
+                    .connect(remote)
+                    .await
+                    .map_err(|_| TlsError::TcpError)?;
+
+                let session = Session::new(
+                    socket,
+                    self.host,
+                    Mode::Client,
+                    self.version,
+                    self.certificates,
+                )?;
+
+                session.connect().await
+            }
+        }
+    }
+
     /// Implements edge-nal traits
     #[cfg(feature = "edge-nal")]
     pub use edge_nal_compat::*;
@@ -1108,16 +1200,40 @@ pub mod asynch {
     #[cfg(feature = "edge-nal")]
     mod edge_nal_compat {
 
-        use super::{AsyncConnectedSession, Session};
+        use super::{AsyncConnectedSession, Session, TlsClient};
         use crate::{Certificates, Mode, Peripheral, Rsa, TlsError, TlsVersion, RSA, RSA_REF};
         use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
         use edge_nal::TcpBind;
         use edge_nal_embassy::{Tcp, TcpAccept, TcpSocket};
+        use embassy_net::driver::Driver;
+
+        impl<'d, T: edge_nal::TcpConnect, const N: usize> edge_nal::TcpConnect for TlsClient<'d, T, N> {
+            type Error = TlsError;
+            type Socket<'a> = AsyncConnectedSession<<T as edge_nal::TcpConnect>::Socket<'a>, N> where Self: 'a;
+
+            async fn connect(&self, remote: SocketAddr) -> Result<Self::Socket<'_>, Self::Error> {
+                let socket = self
+                    .tcp
+                    .connect(remote)
+                    .await
+                    .map_err(|_| TlsError::TcpError)?;
+
+                let session = Session::new(
+                    socket,
+                    self.host,
+                    Mode::Client,
+                    self.version,
+                    self.certificates,
+                )?;
+
+                session.connect().await
+            }
+        }
 
         pub struct TlsAcceptor<
             'd,
-            D: embassy_net::driver::Driver,
+            D: Driver,
             const N: usize,
             const TX_SZ: usize,
             const RX_SZ: usize,
@@ -1131,7 +1247,7 @@ pub mod asynch {
         impl<'d, D, const N: usize, const TX_SZ: usize, const RX_SZ: usize> Drop
             for TlsAcceptor<'d, D, N, TX_SZ, RX_SZ>
         where
-            D: embassy_net::driver::Driver,
+            D: Driver,
         {
             fn drop(&mut self) {
                 unsafe {
@@ -1148,7 +1264,7 @@ pub mod asynch {
         impl<'d, D, const N: usize, const TX_SZ: usize, const RX_SZ: usize>
             TlsAcceptor<'d, D, N, TX_SZ, RX_SZ>
         where
-            D: embassy_net::driver::Driver,
+            D: Driver,
         {
             pub async fn new(
                 tcp: &'d Tcp<'d, D, N, TX_SZ, RX_SZ>,
@@ -1196,7 +1312,7 @@ pub mod asynch {
         impl<'d, D, const N: usize, const TX_SZ: usize, const RX_SZ: usize> edge_nal::TcpAccept
             for TlsAcceptor<'d, D, N, TX_SZ, RX_SZ>
         where
-            D: embassy_net::driver::Driver,
+            D: Driver,
         {
             type Error = TlsError;
             type Socket<'a> = AsyncConnectedSession<TcpSocket<'a, N, TX_SZ, RX_SZ>, RX_SZ> where Self: 'a;
@@ -1209,7 +1325,7 @@ pub mod asynch {
                     .acceptor
                     .accept()
                     .await
-                    .map_err(|e| TlsError::TcpError(e))?;
+                    .map_err(|_| TlsError::TcpError)?;
                 log::debug!("Accepted new connection on socket");
 
                 let session: Session<_, RX_SZ> =

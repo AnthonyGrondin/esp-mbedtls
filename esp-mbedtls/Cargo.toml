@@ -15,6 +15,7 @@ cfg-if = "1.0.0"
 edge-nal = { package = "edge-nal", git = "https://github.com/ivmarkov/edge-net/", optional = true }
 edge-nal-embassy = { package = "edge-nal-embassy", git = "https://github.com/ivmarkov/edge-net/", optional = true }
 embassy-net = { version = "0.4", features = [ "tcp", "medium-ethernet"], optional = true }
+embedded-nal-async = { version = "0.7.1", features = ["ip_in_core"], optional = true }
 
 [features]
 async = ["dep:embedded-io-async"]
@@ -25,3 +26,6 @@ esp32s3 = ["esp-hal/esp32s3", "esp-mbedtls-sys/esp32s3"]
 
 # Implement the traits defined in the latest HEAD of `edge-nal`
 edge-nal = ["dep:edge-nal", "dep:edge-nal-embassy", "dep:embassy-net"]
+
+# Implement the traits defined in `embedded-nal-async`.
+embedded-nal-async = ["dep:embedded-nal-async"]

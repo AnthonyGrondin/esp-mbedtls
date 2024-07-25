@@ -8,13 +8,22 @@ use crypto_bigint::*;
 use esp_mbedtls_sys::bindings::*;
 use esp_mbedtls_sys::c_types::*;
 
+use log::error;
+
 macro_rules! error_checked {
     ($block:expr) => {{
         let res = $block;
         if res != 0 {
-            panic!("Non zero error {:?}", res);
-        } else {
-            // Do nothing for now
+            error!("Non zero error {:?}", res);
+            return res;
+        }
+    }};
+    ($block:expr, $callback:expr) => {{
+        let res = $block;
+        if res != 0 {
+            error!("Non zero error {:?}", res);
+            $callback;
+            return res;
         }
     }};
 }
@@ -101,8 +110,14 @@ fn calculate_rinv(prec_RR: &mut mbedtls_mpi, M: &mbedtls_mpi, num_words: usize) 
 
     unsafe {
         mbedtls_mpi_init(&mut RR);
-        error_checked!(mbedtls_mpi_set_bit(&mut RR, num_bits * 2, 1));
-        error_checked!(mbedtls_mpi_mod_mpi(prec_RR, &RR, M));
+        error_checked!(
+            mbedtls_mpi_set_bit(&mut RR, num_bits * 2, 1),
+            mbedtls_mpi_free(&mut RR)
+        );
+        error_checked!(
+            mbedtls_mpi_mod_mpi(prec_RR, &RR, M),
+            mbedtls_mpi_free(&mut RR)
+        );
         mbedtls_mpi_free(&mut RR);
     }
 
@@ -167,7 +182,7 @@ pub unsafe extern "C" fn mbedtls_mpi_exp_mod(
             };
 
             if rinv.private_p.is_null() {
-                calculate_rinv(rinv, M, num_words);
+                error_checked!(calculate_rinv(rinv, M, num_words));
             }
 
             unsafe {
