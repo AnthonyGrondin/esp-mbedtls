@@ -34,7 +34,7 @@ use esp_wifi::wifi::{
     WifiState,
 };
 use esp_wifi::{init, EspWifiInitFor};
-use hal::{prelude::*, rng::Rng, timer::timg::TimerGroup};
+use hal::{peripherals::SHA, prelude::*, rng::Rng, timer::timg::TimerGroup};
 
 // Patch until https://github.com/embassy-rs/static-cell/issues/16 is fixed
 macro_rules! mk_static {
@@ -161,6 +161,8 @@ async fn main(spawner: Spawner) -> ! {
         ..Default::default()
     };
 
+    let sha = mk_static!(SHA, peripherals.SHA);
+
     loop {
         let tls_acceptor = esp_mbedtls::asynch::TlsAcceptor::new(
             tcp,
@@ -168,6 +170,7 @@ async fn main(spawner: Spawner) -> ! {
             443,
             TlsVersion::Tls1_2,
             certificates,
+            &mut *sha,
         )
         .await
         .with_hardware_rsa(&mut peripherals.RSA);
