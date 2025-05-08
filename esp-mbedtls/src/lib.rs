@@ -168,7 +168,8 @@ impl embedded_io::Error for TlsError {
 
 /// Format type for [X509]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum CertificateFormat {
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub enum CertificateFormat {
     PEM,
     DER,
 }
@@ -191,6 +192,21 @@ enum CertificateFormat {
 pub struct X509<'a> {
     bytes: &'a [u8],
     format: CertificateFormat,
+}
+
+impl core::fmt::Display for X509<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "X509 {{ bytes: ")?;
+        if let CertificateFormat::PEM = self.format {
+            // write the PEM out with real newlines
+            let s = unsafe { core::str::from_utf8_unchecked(self.bytes) };
+            write!(f, "{}", s)?;
+        } else {
+            // for DER, just show the bytes as a hex dump or so:
+            write!(f, "{:?}", self.bytes)?;
+        }
+        write!(f, ", format: {:?} }}", self.format)
+    }
 }
 
 impl<'a> X509<'a> {
@@ -226,6 +242,11 @@ impl<'a> X509<'a> {
     /// Returns the bytes of the certificate
     pub fn data(&self) -> &'a [u8] {
         self.bytes
+    }
+
+    /// Returns the encoding format of a certificate
+    pub fn format(&self) -> CertificateFormat {
+        self.format
     }
 
     /// Returns the length of the certificate
