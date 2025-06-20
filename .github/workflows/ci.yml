@@ -22,25 +22,72 @@ concurrency:
 jobs:
   all:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
-      - uses: actions/checkout@v3
+      # === Setup ====
+      - uses: actions/checkout@v4
+      - name: mbedtls init
+        run: git submodule update --init --recursive
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          target: x86_64-unknown-linux-gnu
+          toolchain: stable
+          components: rust-src,rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Rust for Xtensa
+        uses: esp-rs/xtensa-toolchain@v1.5
+        with:
+          ldproxy: true
+          override: false
+
+      # === Build libs ====
+      - uses: dorny/paths-filter@v3
+        id: detect-changes
+        with:
+          filters: |
+            libs:
+              - 'esp-mbedtls-sys/**'
+
+      # https://github.com/esp-rs/xtensa-toolchain/issues/40
+      - name: Install full Espressif LLVM installation
+        if: steps.detect-changes.outputs.libs == 'true'
+        run: $HOME/.cargo/bin/espup install -l debug --extended-llvm
+
+      - name: Build libraries and bindings
+        if: steps.detect-changes.outputs.libs == 'true'
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake
+          rm -rf esp-mbedtls-sys/libs/*
+          cargo +stable run --manifest-path ./xtask/Cargo.toml gen
+
+      # === Test ====
+      # Tests requires nightly riscv32imc-unknown-none-elf to be installed
       - uses: dtolnay/rust-toolchain@v1
         with:
           target: riscv32imc-unknown-none-elf
           toolchain: nightly
           components: rust-src,rustfmt
-      - uses: esp-rs/xtensa-toolchain@v1.5
-        with:
-          ldproxy: true
-          override: false
-      - uses: Swatinem/rust-cache@v2
       - uses: extractions/setup-just@v1
         with:
           just-version: 1.13.0
 
-      - name: mbedtls init
-        run: git submodule update --init --recursive
-
       - name: check
         run: just
+
+        # Only push when on main, and tests are successful
+      - name: Commit and push libraries on success
+        if: |
+          steps.detect-changes.outputs.libs == 'true' &&
+          github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add esp-mbedtls-sys/libs
+          git add esp-mbedtls-sys/src
+          git diff --cached --quiet || (
+            git commit -m "chore: auto-push built libraries"
+            git push origin HEAD:main
+          )
