@@ -5,6 +5,8 @@ use core::ffi::{c_char, c_int, c_uchar, c_ulong, c_void, CStr};
 use core::fmt;
 use core::marker::PhantomData;
 use core::mem::size_of;
+use core::ops::Deref;
+use core::ptr::NonNull;
 
 use critical_section::Mutex;
 
@@ -21,6 +23,7 @@ use esp_mbedtls_sys::bindings::*;
 #[cfg(any(
     feature = "esp32",
     feature = "esp32c3",
+    feature = "esp32c6",
     feature = "esp32s2",
     feature = "esp32s3"
 ))]
@@ -31,6 +34,7 @@ mod edge_nal;
 #[cfg(any(
     feature = "esp32",
     feature = "esp32c3",
+    feature = "esp32c6",
     feature = "esp32s2",
     feature = "esp32s3"
 ))]
@@ -42,20 +46,32 @@ pub mod io {
     pub use embedded_io::*;
 }
 
+#[cfg(feature = "esp32c6")]
+#[no_mangle]
+unsafe extern "C" fn memchr(ptr: *const u8, ch: u8, count: usize) -> *const u8 {
+    for i in 0..count {
+        if ptr.add(i).read() == ch {
+            return ptr.add(i);
+        }
+    }
+
+    return core::ptr::null();
+}
+
 unsafe fn aligned_calloc(_align: usize, size: usize) -> *const c_void {
     // if _align > 4 {
     //     panic!("Cannot allocate with alignment > 4 bytes: {_align}");
     // }
 
-    calloc(1, size)
+    mbedtls_calloc(1, size)
 }
 
 // Baremetal: these will come from `esp-wifi` (i.e. this can only be used together with esp-wifi)
 // STD: these will come from `libc` indirectly via the Rust standard library
 extern "C" {
-    fn free(ptr: *const c_void);
+    fn mbedtls_free(ptr: *const c_void);
 
-    fn calloc(number: usize, size: usize) -> *const c_void;
+    fn mbedtls_calloc(nmemb: usize, size: usize) -> *const c_void;
 
     fn random() -> c_ulong;
 }
@@ -119,6 +135,69 @@ impl TlsVersion {
     }
 }
 
+/// Certificate verification mode used for a session
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AuthMode {
+    /// Peer certificate is not checked (default on server) (insecure on client)
+    None,
+    /// Peer certificate is checked, however the handshake continues even if verification failed;
+    /// [mbedtls_ssl_get_verify_result()] can be called after the handshake is complete.
+    Optional,
+    /// Peer *must* present a valid certificate, handshake is aborted if verification failed. (default on client)
+    Required,
+    /// Used only for sni_authmode
+    Unset,
+}
+
+impl AuthMode {
+    fn to_mbedtls_authmode(&self) -> i32 {
+        (match self {
+            AuthMode::None => MBEDTLS_SSL_VERIFY_NONE,
+            AuthMode::Optional => MBEDTLS_SSL_VERIFY_OPTIONAL,
+            AuthMode::Required => MBEDTLS_SSL_VERIFY_REQUIRED,
+            AuthMode::Unset => MBEDTLS_SSL_VERIFY_UNSET,
+        }) as i32
+    }
+}
+
+/// Configuration for a TLS session
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SessionConfig<'a> {
+    /// The mode of operation of a TLS `Session` instance
+    mode: Mode<'a>,
+    /// The minimum TLS version that will be supported by a particular `Session` instance
+    min_version: TlsVersion,
+    /// Certificate verification mode. Can be overriden.
+    /// By default, the following we be used depending on the mode:
+    ///  - [AuthMode::None] on server
+    ///  - [AuthMode::Required] on client
+    auth_mode: AuthMode,
+}
+
+impl<'a> SessionConfig<'a> {
+    /// Create a config for a session
+    ///
+    /// # Arguments
+    ///
+    /// * `mode` - The mode of operation of a TLS `Session` instance
+    /// * `min_version` - The minimum TLS version that will be supported by a particular `Session` instance
+    pub fn new(mode: Mode<'a>, min_version: TlsVersion) -> Self {
+        Self {
+            mode,
+            min_version,
+            auth_mode: match mode {
+                Mode::Client { servername: _ } => AuthMode::Required,
+                Mode::Server => AuthMode::None,
+            },
+        }
+    }
+
+    /// Override the auth mode to use a specific one
+    pub fn set_auth_mode(&mut self, auth_mode: AuthMode) {
+        self.auth_mode = auth_mode
+    }
+}
+
 /// Error type for TLS operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TlsError {
@@ -134,6 +213,8 @@ pub enum TlsError {
     Eof,
     /// X509 certificate missing null terminator
     X509MissingNullTerminator,
+    /// The X509 is in an unexpected format (PEM instead of DER and vice-versa)
+    InvalidFormat,
     /// The client has given no certificates for the request
     NoClientCertificate,
     /// IO error
@@ -151,11 +232,19 @@ impl fmt::Display for TlsError {
             Self::X509MissingNullTerminator => {
                 write!(f, "X509 certificate missing null terminator")
             }
+            Self::InvalidFormat => {
+                write!(
+                    f,
+                    "The X509 is in an unexpected format (PEM instead of DER and vice-versa)"
+                )
+            }
             Self::NoClientCertificate => write!(f, "No client certificate"),
             Self::Io(e) => write!(f, "IO error: {e:?}"),
         }
     }
 }
+
+impl core::error::Error for TlsError {}
 
 impl embedded_io::Error for TlsError {
     fn kind(&self) -> embedded_io::ErrorKind {
@@ -168,7 +257,7 @@ impl embedded_io::Error for TlsError {
 
 /// Format type for [X509]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum CertificateFormat {
+pub enum CertificateFormat {
     PEM,
     DER,
 }
@@ -228,6 +317,11 @@ impl<'a> X509<'a> {
         self.bytes
     }
 
+    /// Returns the encoding format of a certificate
+    pub fn format(&self) -> CertificateFormat {
+        self.format
+    }
+
     /// Returns the length of the certificate
     pub(crate) fn len(&self) -> usize {
         self.data().len()
@@ -244,12 +338,224 @@ impl<'a> X509<'a> {
     }
 }
 
-/// Certificates used for a connection.
-///
-/// # Note:
-/// Both [certificate](Certificates::certificate) and [private_key](Certificates::private_key) must be set in pair.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Certificates<'a> {
+/// Creates a wrapper over [mbedtls_x509_crt] to safely manage allocation and freeing on drop
+#[derive(Debug)]
+pub struct MbedTLSX509Crt<'d> {
+    crt: NonNull<mbedtls_x509_crt>,
+    _t: PhantomData<&'d ()>,
+}
+
+impl MbedTLSX509Crt<'static> {
+    /// Parse an X509 certificate into RAM by making a copy
+    ///
+    /// # Arguments
+    ///
+    /// * `certificate` - The X509 certificate in PEM or DER format
+    ///
+    /// # Errors
+    ///
+    /// This will return an error if an error occurs during parsing such as passing a DER encoded
+    /// certificate in a PEM format, and vice-versa.
+    pub fn new(certificate: X509<'_>) -> Result<Self, TlsError> {
+        unsafe {
+            let ptr = aligned_calloc(
+                align_of::<mbedtls_x509_crt>(),
+                size_of::<mbedtls_x509_crt>(),
+            ) as *mut mbedtls_x509_crt;
+            if ptr.is_null() {
+                return Err(TlsError::OutOfMemory);
+            }
+            mbedtls_x509_crt_init(ptr);
+
+            let cleanup = || {
+                mbedtls_x509_crt_free(ptr);
+                mbedtls_free(ptr as *const _);
+            };
+
+            match certificate.format {
+                CertificateFormat::PEM => {
+                    error_checked!(
+                        mbedtls_x509_crt_parse(ptr, certificate.as_ptr(), certificate.len()),
+                        cleanup
+                    )
+                }
+                CertificateFormat::DER => {
+                    error_checked!(
+                        mbedtls_x509_crt_parse_der(ptr, certificate.as_ptr(), certificate.len()),
+                        cleanup
+                    )
+                }
+            }
+            .map_err(|err| {
+                if matches!(err, TlsError::MbedTlsError(-8576)) {
+                    TlsError::InvalidFormat
+                } else {
+                    err
+                }
+            })?;
+            Ok(Self {
+                crt: NonNull::new_unchecked(ptr),
+                _t: PhantomData,
+            })
+        }
+    }
+}
+
+impl<'d> MbedTLSX509Crt<'d> {
+    /// Parse an X509 certificate without making a copy in RAM. This requires that the underlying data
+    /// lives for the lifetime of the certificate.
+    /// Note: This is currently only supported for DER encoded certificates
+    ///
+    /// # Arguments
+    ///
+    /// * `certificate` - The X509 certificate in DER format only
+    ///
+    /// # Errors
+    ///
+    /// This will return an error if an error occurs during parsing.
+    /// [TlsError::InvalidFormat] will be returned if a PEM encoded certificate is passed.
+    pub fn new_no_copy(certificate: X509<'d>) -> Result<Self, TlsError> {
+        // Currently no copy is only supported by DER certificates
+        if matches!(certificate.format(), CertificateFormat::PEM) {
+            return Err(TlsError::InvalidFormat);
+        }
+        unsafe {
+            let ptr = aligned_calloc(
+                align_of::<mbedtls_x509_crt>(),
+                size_of::<mbedtls_x509_crt>(),
+            ) as *mut mbedtls_x509_crt;
+            if ptr.is_null() {
+                return Err(TlsError::OutOfMemory);
+            }
+            mbedtls_x509_crt_init(ptr);
+
+            let cleanup = || {
+                mbedtls_x509_crt_free(ptr);
+                mbedtls_free(ptr as *const _);
+            };
+
+            error_checked!(
+                mbedtls_x509_crt_parse_der_nocopy(ptr, certificate.as_ptr(), certificate.len()),
+                cleanup
+            )
+            .map_err(|err| {
+                if matches!(err, TlsError::MbedTlsError(-8576)) {
+                    TlsError::InvalidFormat
+                } else {
+                    err
+                }
+            })?;
+
+            Ok(Self {
+                crt: NonNull::new_unchecked(ptr),
+                _t: PhantomData,
+            })
+        }
+    }
+}
+
+impl Deref for MbedTLSX509Crt<'_> {
+    type Target = mbedtls_x509_crt;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.crt.as_ref() }
+    }
+}
+
+impl core::convert::AsRef<mbedtls_x509_crt> for MbedTLSX509Crt<'_> {
+    fn as_ref(&self) -> &mbedtls_x509_crt {
+        self
+    }
+}
+
+impl Drop for MbedTLSX509Crt<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            mbedtls_x509_crt_free(self.crt.as_ptr());
+            mbedtls_free(self.crt.as_ptr() as *const _);
+        }
+    }
+}
+
+/// Creates a wrapper over [mbedtls_pk_context] to safely manage allocation and freeing on drop
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct PkContext(NonNull<mbedtls_pk_context>);
+
+impl PkContext {
+    /// Parse an X509 private key into RAM and returns a wrapped pointer if successful.
+    ///
+    /// # Arguments
+    ///
+    /// * `private_key` - The X509 private key in DER or PEM format
+    /// * `password` - The optional password if the private key is password protected
+    ///
+    /// # Errors
+    ///
+    /// This will return an error if an error occurs during parsing such as passing a DER encoded
+    /// private key in a PEM format, and vice-versa.
+    pub fn new<'a>(private_key: X509<'a>, password: Option<&'a str>) -> Result<Self, TlsError> {
+        unsafe {
+            let ptr = aligned_calloc(
+                align_of::<mbedtls_pk_context>(),
+                size_of::<mbedtls_pk_context>(),
+            ) as *mut mbedtls_pk_context;
+            if ptr.is_null() {
+                return Err(TlsError::OutOfMemory);
+            }
+
+            mbedtls_pk_init(ptr);
+
+            let (password_ptr, password_len) = if let Some(password) = password {
+                (password.as_ptr(), password.len())
+            } else {
+                (core::ptr::null(), 0)
+            };
+            error_checked!(
+                mbedtls_pk_parse_key(
+                    ptr,
+                    private_key.as_ptr(),
+                    private_key.len(),
+                    password_ptr,
+                    password_len,
+                    None,
+                    core::ptr::null_mut(),
+                ),
+                || {
+                    mbedtls_pk_free(ptr);
+                    mbedtls_free(ptr as *const _);
+                }
+            )?;
+            Ok(Self(NonNull::new_unchecked(ptr)))
+        }
+    }
+}
+
+impl Deref for PkContext {
+    type Target = mbedtls_pk_context;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl core::convert::AsRef<mbedtls_pk_context> for PkContext {
+    fn as_ref(&self) -> &mbedtls_pk_context {
+        self
+    }
+}
+
+impl Drop for PkContext {
+    fn drop(&mut self) {
+        unsafe {
+            mbedtls_pk_free(self.0.as_ptr());
+            mbedtls_free(self.0.as_ptr() as *const _);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Certificates<'d> {
     /// Trusted CA (Certificate Authority) chain to be used for certificate
     /// verification during the SSL/TLS handshake.
     ///
@@ -261,11 +567,10 @@ pub struct Certificates<'a> {
     /// that will be used to verify the server's certificate during the handshake.
     ///
     /// # Server:
-    /// In server mode, the CA chain should contain the trusted CA certificates
-    /// that will be used to verify the client's certificate during the handshake.
-    /// When set to [None] the server will not request nor perform any verification
-    /// on the client certificates. Only set when you want to use client authentication.
-    pub ca_chain: Option<X509<'a>>,
+    /// In server mode, the CA chain should contain the trusted CA certificates that will be
+    /// provided to the client and that will be used to verify the client's certificate
+    /// during the handshake, if enabled.
+    ca_chain: Option<&'d mbedtls_x509_crt>,
 
     /// Own certificate chain used for requests
     /// It should contain in order from the bottom up your certificate chain.
@@ -279,16 +584,16 @@ pub struct Certificates<'a> {
     /// # Server:
     /// In server mode, this will be the certificate given to the client when
     /// performing a handshake.
-    pub certificate: Option<X509<'a>>,
+    /// When set to [None] the server will not request nor perform any verification
+    /// on the client certificates. Only set when you want to use client authentication.
+    certificate: Option<&'d mbedtls_x509_crt>,
 
     /// Private key paired with the certificate. Must be set when [Certificates::certificate]
     /// is not [None]
-    pub private_key: Option<X509<'a>>,
-
-    /// Password used for the private key.
-    /// Use [None] when the private key doesn't have a password.
-    pub password: Option<&'a str>,
+    private_key: Option<&'d mbedtls_pk_context>,
 }
+
+unsafe impl Send for Certificates<'_> {}
 
 impl Default for Certificates<'_> {
     fn default() -> Self {
@@ -296,40 +601,82 @@ impl Default for Certificates<'_> {
     }
 }
 
-impl Certificates<'_> {
+impl<'d> Certificates<'d> {
     /// Create a new instance of [Certificates] with no certificates whatsoever
     pub const fn new() -> Self {
         Self {
             ca_chain: None,
             certificate: None,
             private_key: None,
-            password: None,
         }
     }
 
-    // Initialize the SSL using this set of certificates
+    /// Get a reference to the underlying parsed X509 peer certificate, if configured
+    pub fn certificate(&self) -> Option<&mbedtls_x509_crt> {
+        self.certificate
+    }
+
+    /// Get a reference to the underlying parsed CA Chain X509 certificate, if configured
+    pub fn ca_chain(&self) -> Option<&mbedtls_x509_crt> {
+        self.ca_chain
+    }
+
+    /// Initialize the own certificate chain and private key used for requests
+    /// It should contain in order from the bottom up your certificate chain.
+    /// The top certificate (self-signed) can be omitted.
+    ///
+    /// # Client:
+    /// In client mode, this certificate will be used for client authentication
+    /// when communicating wiht the server. Do not call this function if you don't want to use
+    /// client authentication
+    ///
+    /// # Server:
+    /// In server mode, this will be the certificate given to the client when
+    /// performing a handshake.
+    ///
+    /// # Arguments
+    ///
+    /// * `certificate` - The X509 certificate in DER or PEM format
+    /// * `private_key` - The X509 private key in DER or PEM format
+    /// * `password` - The optional password if the private key is password protected
+    ///
+    /// # Errors
+    ///
+    /// This function will fail with [TlsError::OutOfMemory] if there's not enough memory to
+    /// allocate certificates.
+    pub fn with_certificates(
+        mut self,
+        certificate: &'d mbedtls_x509_crt,
+        private_key: &'d mbedtls_pk_context,
+    ) -> Self {
+        self.certificate = Some(certificate);
+        self.private_key = Some(private_key);
+        self
+    }
+
+    /// Initialize the Certificate Authority chain used for requests
+    ///
+    /// # Errors
+    ///
+    /// This function will fail with [TlsError::OutOfMemory] if there's not enough memory to
+    /// allocate certificates.
+    pub fn with_ca_chain(mut self, ca_chain: &'d mbedtls_x509_crt) -> Self {
+        self.ca_chain = Some(ca_chain);
+        self
+    }
+
+    /// Initialize the SSL using this set of certificates
     fn init_ssl(
         &self,
-        mode: Mode,
-        min_version: TlsVersion,
+        config: SessionConfig<'_>,
     ) -> Result<
         (
             *mut mbedtls_ctr_drbg_context,
             *mut mbedtls_ssl_context,
             *mut mbedtls_ssl_config,
-            *mut mbedtls_x509_crt,
-            *mut mbedtls_x509_crt,
-            *mut mbedtls_pk_context,
         ),
         TlsError,
     > {
-        // Make sure that both certificate and private_key are either Some() or None
-        assert_eq!(
-            self.certificate.is_some(),
-            self.private_key.is_some(),
-            "Both certificate and private_key must be Some() or None"
-        );
-
         // TODO: Allocate a lot of these things:
         // - In one chunk
         // - With a `Box`, which is safer
@@ -356,7 +703,7 @@ impl Certificates<'_> {
                 size_of::<mbedtls_ssl_context>(),
             ) as *mut mbedtls_ssl_context;
             if ssl_context.is_null() {
-                free(drbg_context as *const _);
+                mbedtls_free(drbg_context as *const _);
                 return Err(TlsError::OutOfMemory);
             }
 
@@ -365,55 +712,13 @@ impl Certificates<'_> {
                 size_of::<mbedtls_ssl_config>(),
             ) as *mut mbedtls_ssl_config;
             if ssl_config.is_null() {
-                free(drbg_context as *const _);
-                free(ssl_context as *const _);
-                return Err(TlsError::OutOfMemory);
-            }
-
-            let crt = aligned_calloc(
-                align_of::<mbedtls_x509_crt>(),
-                size_of::<mbedtls_x509_crt>(),
-            ) as *mut mbedtls_x509_crt;
-            if crt.is_null() {
-                free(drbg_context as *const _);
-                free(ssl_context as *const _);
-                free(ssl_config as *const _);
-                return Err(TlsError::OutOfMemory);
-            }
-
-            let certificate = aligned_calloc(
-                align_of::<mbedtls_x509_crt>(),
-                size_of::<mbedtls_x509_crt>(),
-            ) as *mut mbedtls_x509_crt;
-            if certificate.is_null() {
-                free(drbg_context as *const _);
-                free(ssl_context as *const _);
-                free(ssl_config as *const _);
-                free(crt as *const _);
-                return Err(TlsError::OutOfMemory);
-            }
-
-            let private_key = aligned_calloc(
-                align_of::<mbedtls_pk_context>(),
-                size_of::<mbedtls_pk_context>(),
-            ) as *mut mbedtls_pk_context;
-            if private_key.is_null() {
-                free(drbg_context as *const _);
-                free(ssl_context as *const _);
-                free(ssl_config as *const _);
-                free(crt as *const _);
-                free(certificate as *const _);
+                mbedtls_free(drbg_context as *const _);
+                mbedtls_free(ssl_context as *const _);
                 return Err(TlsError::OutOfMemory);
             }
 
             mbedtls_ssl_init(ssl_context);
             mbedtls_ssl_config_init(ssl_config);
-            // Initialize CA chain
-            mbedtls_x509_crt_init(crt);
-            // Initialize certificate
-            mbedtls_x509_crt_init(certificate);
-            // Initialize private key
-            mbedtls_pk_init(private_key);
 
             //(*ssl_config).private_f_dbg = Some(dbg_print);
             mbedtls_ssl_conf_dbg(ssl_config, Some(dbg_print), core::ptr::null_mut());
@@ -428,21 +733,15 @@ impl Certificates<'_> {
                 mbedtls_ctr_drbg_free(drbg_context);
                 mbedtls_ssl_config_free(ssl_config);
                 mbedtls_ssl_free(ssl_context);
-                mbedtls_x509_crt_free(crt);
-                mbedtls_x509_crt_free(certificate);
-                mbedtls_pk_free(private_key);
-                free(drbg_context as *const _);
-                free(ssl_context as *const _);
-                free(ssl_config as *const _);
-                free(crt as *const _);
-                free(certificate as *const _);
-                free(private_key as *const _);
+                mbedtls_free(drbg_context as *const _);
+                mbedtls_free(ssl_context as *const _);
+                mbedtls_free(ssl_config as *const _);
             };
 
             error_checked!(
                 mbedtls_ssl_config_defaults(
                     ssl_config,
-                    mode.to_mbed_tls(),
+                    config.mode.to_mbed_tls(),
                     MBEDTLS_SSL_TRANSPORT_STREAM as i32,
                     MBEDTLS_SSL_PRESET_DEFAULT as i32,
                 ),
@@ -451,86 +750,35 @@ impl Certificates<'_> {
 
             // Set the minimum TLS version
             // Use a ddirect field modified for compatibility with the `esp-idf-svc` mbedtls
-            (*ssl_config).private_min_tls_version = min_version.to_mbed_tls_version();
+            (*ssl_config).private_min_tls_version = config.min_version.to_mbed_tls_version();
 
-            mbedtls_ssl_conf_authmode(
-                ssl_config,
-                if self.ca_chain.is_some() {
-                    MBEDTLS_SSL_VERIFY_REQUIRED as i32
-                } else {
-                    // Use this config when in server mode
-                    // Ref: https://os.mbed.com/users/markrad/code/mbedtls/docs/tip/ssl_8h.html#a5695285c9dbfefec295012b566290f37
-                    MBEDTLS_SSL_VERIFY_NONE as i32
-                },
-            );
+            mbedtls_ssl_conf_authmode(ssl_config, config.auth_mode.to_mbedtls_authmode());
 
-            if let Mode::Client { servername } = mode {
+            if let Mode::Client { servername } = config.mode {
                 error_checked!(
                     mbedtls_ssl_set_hostname(ssl_context, servername.as_ptr(),),
                     cleanup
                 )?;
             }
 
+            if let (Some(certificate), Some(private_key)) = (self.certificate, self.private_key) {
+                mbedtls_ssl_conf_own_cert(
+                    ssl_config,
+                    certificate as *const _ as *mut mbedtls_x509_crt,
+                    private_key as *const _ as *mut mbedtls_pk_context,
+                );
+            }
+
             if let Some(ca_chain) = self.ca_chain {
-                error_checked!(
-                    mbedtls_x509_crt_parse(crt, ca_chain.as_ptr(), ca_chain.len()),
-                    cleanup
-                )?;
+                mbedtls_ssl_conf_ca_chain(
+                    ssl_config,
+                    ca_chain as *const _ as *mut mbedtls_x509_crt,
+                    core::ptr::null_mut(),
+                );
             }
 
-            if let (Some(cert), Some(key)) = (self.certificate, self.private_key) {
-                // Certificate
-                match cert.format {
-                    CertificateFormat::PEM => {
-                        error_checked!(
-                            mbedtls_x509_crt_parse(certificate, cert.as_ptr(), cert.len()),
-                            cleanup
-                        )?;
-                    }
-                    CertificateFormat::DER => {
-                        error_checked!(
-                            mbedtls_x509_crt_parse_der_nocopy(
-                                certificate,
-                                cert.as_ptr(),
-                                cert.len(),
-                            ),
-                            cleanup
-                        )?;
-                    }
-                }
-
-                // Private key
-                let (password_ptr, password_len) = if let Some(password) = self.password {
-                    (password.as_ptr(), password.len())
-                } else {
-                    (core::ptr::null(), 0)
-                };
-                error_checked!(
-                    mbedtls_pk_parse_key(
-                        private_key,
-                        key.as_ptr(),
-                        key.len(),
-                        password_ptr,
-                        password_len,
-                        None,
-                        core::ptr::null_mut(),
-                    ),
-                    cleanup
-                )?;
-
-                mbedtls_ssl_conf_own_cert(ssl_config, certificate, private_key);
-            }
-
-            mbedtls_ssl_conf_ca_chain(ssl_config, crt, core::ptr::null_mut());
             error_checked!(mbedtls_ssl_setup(ssl_context, ssl_config), cleanup)?;
-            Ok((
-                drbg_context,
-                ssl_context,
-                ssl_config,
-                crt,
-                certificate,
-                private_key,
-            ))
+            Ok((drbg_context, ssl_context, ssl_config))
         }
     }
 }
@@ -581,6 +829,7 @@ impl Tls<'_> {
     #[cfg(not(any(
         feature = "esp32",
         feature = "esp32c3",
+        feature = "esp32c6",
         feature = "esp32s2",
         feature = "esp32s3"
     )))]
@@ -671,9 +920,6 @@ pub struct Session<'a, T> {
     drbg_context: *mut mbedtls_ctr_drbg_context,
     ssl_context: *mut mbedtls_ssl_context,
     ssl_config: *mut mbedtls_ssl_config,
-    crt: *mut mbedtls_x509_crt,
-    client_crt: *mut mbedtls_x509_crt,
-    private_key: *mut mbedtls_pk_context,
     state: SessionState,
     _tls_ref: TlsReference<'a>,
 }
@@ -686,6 +932,7 @@ impl<'a, T> Session<'a, T> {
     /// * `stream` - The stream for the connection.
     /// * `mode` - Use [Mode::Client] if you are running a client. [Mode::Server] if you are
     ///   running a server.
+    /// * `auth_mode` - Certificate verification mode
     /// * `min_version` - The minimum TLS version for the connection, that will be accepted.
     /// * `certificates` - Certificate chain for the connection. Will play a different role
     ///   depending on if running as client or server. See [Certificates] for more information.
@@ -698,21 +945,16 @@ impl<'a, T> Session<'a, T> {
     /// invalid format.
     pub fn new(
         stream: T,
-        mode: Mode,
-        min_version: TlsVersion,
-        certificates: Certificates,
+        config: SessionConfig<'_>,
+        certificates: &'a Certificates<'a>,
         tls_ref: TlsReference<'a>,
     ) -> Result<Self, TlsError> {
-        let (drbg_context, ssl_context, ssl_config, crt, client_crt, private_key) =
-            certificates.init_ssl(mode, min_version)?;
+        let (drbg_context, ssl_context, ssl_config) = certificates.init_ssl(config)?;
         Ok(Self {
             stream,
             drbg_context,
             ssl_context,
             ssl_config,
-            crt,
-            client_crt,
-            private_key,
             state: SessionState::Initial,
             _tls_ref: tls_ref,
         })
@@ -911,15 +1153,9 @@ impl<T> Drop for Session<'_, T> {
             mbedtls_ctr_drbg_free(self.drbg_context);
             mbedtls_ssl_config_free(self.ssl_config);
             mbedtls_ssl_free(self.ssl_context);
-            mbedtls_x509_crt_free(self.crt);
-            mbedtls_x509_crt_free(self.client_crt);
-            mbedtls_pk_free(self.private_key);
-            free(self.drbg_context as *const _);
-            free(self.ssl_config as *const _);
-            free(self.ssl_context as *const _);
-            free(self.crt as *const _);
-            free(self.client_crt as *const _);
-            free(self.private_key as *const _);
+            mbedtls_free(self.drbg_context as *const _);
+            mbedtls_free(self.ssl_config as *const _);
+            mbedtls_free(self.ssl_context as *const _);
         }
     }
 }
@@ -985,9 +1221,6 @@ pub mod asynch {
         drbg_context: *mut mbedtls_ctr_drbg_context,
         ssl_context: *mut mbedtls_ssl_context,
         ssl_config: *mut mbedtls_ssl_config,
-        crt: *mut mbedtls_x509_crt,
-        client_crt: *mut mbedtls_x509_crt,
-        private_key: *mut mbedtls_pk_context,
         state: SessionState,
         read_byte: Option<u8>,
         write_byte: Option<u8>,
@@ -1002,6 +1235,7 @@ pub mod asynch {
         /// * `stream` - The stream for the connection.
         /// * `mode` - Use [Mode::Client] if you are running a client. [Mode::Server] if you are
         ///   running a server.
+        /// * `auth_mode` - Certificate verification mode
         /// * `min_version` - The minimum TLS version for the connection, that will be accepted.
         /// * `certificates` - Certificate chain for the connection. Will play a different role
         ///   depending on if running as client or server. See [Certificates] for more information.
@@ -1014,21 +1248,16 @@ pub mod asynch {
         /// invalid format.
         pub fn new(
             stream: T,
-            mode: Mode,
-            min_version: TlsVersion,
-            certificates: Certificates,
+            config: SessionConfig<'_>,
+            certificates: &'a Certificates<'a>,
             tls_ref: TlsReference<'a>,
         ) -> Result<Self, TlsError> {
-            let (drbg_context, ssl_context, ssl_config, crt, client_crt, private_key) =
-                certificates.init_ssl(mode, min_version)?;
+            let (drbg_context, ssl_context, ssl_config) = certificates.init_ssl(config)?;
             Ok(Self {
                 stream,
                 drbg_context,
                 ssl_context,
                 ssl_config,
-                crt,
-                client_crt,
-                private_key,
                 state: SessionState::Initial,
                 read_byte: None,
                 write_byte: None,
@@ -1045,15 +1274,9 @@ pub mod asynch {
                 mbedtls_ctr_drbg_free(self.drbg_context);
                 mbedtls_ssl_config_free(self.ssl_config);
                 mbedtls_ssl_free(self.ssl_context);
-                mbedtls_x509_crt_free(self.crt);
-                mbedtls_x509_crt_free(self.client_crt);
-                mbedtls_pk_free(self.private_key);
-                free(self.drbg_context as *const _);
-                free(self.ssl_config as *const _);
-                free(self.ssl_context as *const _);
-                free(self.crt as *const _);
-                free(self.client_crt as *const _);
-                free(self.private_key as *const _);
+                mbedtls_free(self.drbg_context as *const _);
+                mbedtls_free(self.ssl_config as *const _);
+                mbedtls_free(self.ssl_context as *const _);
             }
         }
     }
@@ -1077,7 +1300,7 @@ pub mod asynch {
                     if matches!(self.state, SessionState::Eof) {
                         return Err(TlsError::Eof);
                     }
-
+                    log::debug!("Establish SSL connection OK");
                     self.state = SessionState::Connected;
 
                     Ok(())

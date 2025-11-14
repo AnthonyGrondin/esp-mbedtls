@@ -20,8 +20,8 @@ use embassy_net::{Config, Ipv4Address, Runner, StackResources};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
-use esp_mbedtls::{asynch::Session, Certificates, Mode, TlsVersion};
-use esp_mbedtls::{Tls, X509};
+use esp_mbedtls::{asynch::Session, Certificates, Mode, PkContext, TlsVersion};
+use esp_mbedtls::{MbedTLSX509Crt, SessionConfig, Tls, X509};
 use esp_println::logger::init_logger;
 use esp_println::{print, println};
 use esp_wifi::wifi::{
@@ -73,7 +73,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let esp_wifi_ctrl = &*mk_static!(
         EspWifiController<'_>,
-        init(timg0.timer0, rng.clone(), peripherals.RADIO_CLK,).unwrap()
+        init(timg0.timer0, rng.clone()).unwrap()
     );
 
     let (controller, interfaces) = esp_wifi::wifi::new(&esp_wifi_ctrl, peripherals.WIFI).unwrap();
@@ -140,25 +140,22 @@ async fn main(spawner: Spawner) -> ! {
 
     cfg_if::cfg_if! {
         if #[cfg(feature = "mtls")] {
-            let certificates = Certificates {
-                ca_chain: X509::pem(
-                    concat!(include_str!("./certs/certauth.cryptomix.com.pem"), "\0").as_bytes(),
+            let crt = MbedTLSX509Crt::new(X509::pem(concat!(include_str!("./certs/certificate.pem"), "\0").as_bytes()).unwrap()).unwrap();
+            let private_key = PkContext::new(X509::pem(concat!(include_str!("./certs/private_key.pem"), "\0").as_bytes()).unwrap(), None).unwrap();
+            let ca_chain = MbedTLSX509Crt::new(X509::pem(concat!(include_str!("./certs/certauth.cryptomix.com.pem"), "\0").as_bytes()).unwrap()).unwrap();
+            let certificates = Certificates::new()
+                .with_certificates(
+                    &crt,
+                    &private_key
                 )
-                .ok(),
-                certificate: X509::pem(concat!(include_str!("./certs/certificate.pem"), "\0").as_bytes())
-                    .ok(),
-                private_key: X509::pem(concat!(include_str!("./certs/private_key.pem"), "\0").as_bytes())
-                    .ok(),
-                password: None,
-            };
+                .with_ca_chain(
+                    &ca_chain
+                );
         } else {
-            let certificates = Certificates {
-                ca_chain: X509::pem(
-                    concat!(include_str!("./certs/www.google.com.pem"), "\0").as_bytes(),
-                )
-                .ok(),
-                ..Default::default()
-            };
+            let ca_chain = MbedTLSX509Crt::new(X509::pem(concat!(include_str!("./certs/www.google.com.pem"), "\0").as_bytes()).unwrap()).unwrap();
+            let certificates = Certificates::new().with_ca_chain(
+                &ca_chain
+            );
         }
     }
 
@@ -170,11 +167,13 @@ async fn main(spawner: Spawner) -> ! {
 
     let mut session = Session::new(
         &mut socket,
-        Mode::Client {
-            servername: SERVERNAME,
-        },
-        TlsVersion::Tls1_3,
-        certificates,
+        SessionConfig::new(
+            Mode::Client {
+                servername: SERVERNAME,
+            },
+            TlsVersion::Tls1_3,
+        ),
+        &certificates,
         tls.reference(),
     )
     .unwrap();

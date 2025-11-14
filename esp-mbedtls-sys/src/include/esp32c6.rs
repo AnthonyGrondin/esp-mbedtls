@@ -213,7 +213,6 @@ pub const _HAVE_CC_INHIBIT_LOOP_TO_LIBCALL: u32 = 1;
 pub const _HAVE_INITFINI_ARRAY: u32 = 1;
 pub const _HAVE_LONG_DOUBLE: u32 = 1;
 pub const _ICONV_ENABLED: u32 = 1;
-pub const _LDBL_EQ_DBL: u32 = 1;
 pub const _MB_LEN_MAX: u32 = 1;
 pub const _NANO_MALLOC: u32 = 1;
 pub const _REENT_CHECK_VERIFY: u32 = 1;
@@ -1085,10 +1084,12 @@ pub type __intptr_t = crate::c_types::c_int;
 pub type __uintptr_t = crate::c_types::c_uint;
 pub type wchar_t = crate::c_types::c_int;
 #[repr(C)]
+#[repr(align(16))]
 #[derive(Copy, Clone)]
 pub struct max_align_t {
     pub __clang_max_align_nonce1: crate::c_types::c_longlong,
-    pub __clang_max_align_nonce2: f64,
+    pub __bindgen_padding_0: u64,
+    pub __clang_max_align_nonce2: u128,
 }
 pub type intmax_t = __intmax_t;
 pub type uintmax_t = __uintmax_t;
@@ -13452,12 +13453,23 @@ extern "C" {
     /// \return         \c 1 on failure.
     pub fn mbedtls_sha1_self_test(verbose: crate::c_types::c_int) -> crate::c_types::c_int;
 }
+/// \brief          The SHA-256 context structure.
+///
+///                 The structure is used both for SHA-256 and for SHA-224
+///                 checksum calculations. The choice between these two is
+///                 made in the call to mbedtls_sha256_starts().
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct mbedtls_sha256_context {
-    pub sha224_hasher: *mut crate::c_types::c_void,
-    pub sha256_hasher: *mut crate::c_types::c_void,
-    pub is224: crate::c_types::c_int,
+    ///< The number of Bytes processed.
+    pub private_total: [u32; 2usize],
+    ///< The intermediate digest state.
+    pub private_state: [u32; 8usize],
+    ///< The data block being processed.
+    pub private_buffer: [crate::c_types::c_uchar; 64usize],
+    ///< Determines which function to use:
+    ///0: Use SHA-256, or 1: Use SHA-224.
+    pub private_is224: crate::c_types::c_int,
 }
 extern "C" {
     /// \brief          This function initializes a SHA-256 context.
@@ -13595,12 +13607,23 @@ extern "C" {
     /// \return         \c 1 on failure.
     pub fn mbedtls_sha256_self_test(verbose: crate::c_types::c_int) -> crate::c_types::c_int;
 }
+/// \brief          The SHA-512 context structure.
+///
+///                 The structure is used both for SHA-384 and for SHA-512
+///                 checksum calculations. The choice between these two is
+///                 made in the call to mbedtls_sha512_starts().
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct mbedtls_sha512_context {
-    pub sha384_hasher: *mut crate::c_types::c_void,
-    pub sha512_hasher: *mut crate::c_types::c_void,
-    pub is384: crate::c_types::c_int,
+    ///< The number of Bytes processed.
+    pub private_total: [u64; 2usize],
+    ///< The intermediate digest state.
+    pub private_state: [u64; 8usize],
+    ///< The data block being processed.
+    pub private_buffer: [crate::c_types::c_uchar; 128usize],
+    ///< Determines which function to use:
+    ///0: Use SHA-512, or 1: Use SHA-384.
+    pub private_is384: crate::c_types::c_int,
 }
 extern "C" {
     /// \brief          This function initializes a SHA-512 context.

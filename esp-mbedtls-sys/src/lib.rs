@@ -4,6 +4,7 @@
 #[cfg(any(
     feature = "esp32",
     feature = "esp32c3",
+    feature = "esp32c6",
     feature = "esp32s2",
     feature = "esp32s3"
 ))]
@@ -11,6 +12,7 @@ use esp_wifi as _;
 
 #[cfg(not(target_os = "espidf"))]
 mod c_types;
+mod extra_impls;
 
 #[allow(
     non_camel_case_types,
@@ -24,6 +26,7 @@ pub mod bindings {
         not(any(
             feature = "esp32",
             feature = "esp32c3",
+            feature = "esp32c6",
             feature = "esp32s2",
             feature = "esp32s3"
         ))
@@ -36,6 +39,9 @@ pub mod bindings {
 
     #[cfg(feature = "esp32c3")]
     include!("include/esp32c3.rs");
+
+    #[cfg(feature = "esp32c6")]
+    include!("include/esp32c6.rs");
 
     #[cfg(feature = "esp32s2")]
     include!("include/esp32s2.rs");

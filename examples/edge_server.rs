@@ -27,7 +27,7 @@ use embassy_net::{Config, Runner, StackResources};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
-use esp_mbedtls::{Certificates, Tls, TlsVersion};
+use esp_mbedtls::{AuthMode, Certificates, MbedTLSX509Crt, PkContext, Tls, TlsVersion};
 use esp_mbedtls::{TlsError, X509};
 use esp_println::logger::init_logger;
 use esp_println::println;
@@ -82,7 +82,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let esp_wifi_ctrl = &*mk_static!(
         EspWifiController<'_>,
-        init(timg0.timer0, rng.clone(), peripherals.RADIO_CLK,).unwrap()
+        init(timg0.timer0, rng.clone()).unwrap()
     );
 
     let (controller, interfaces) = esp_wifi::wifi::new(&esp_wifi_ctrl, peripherals.WIFI).unwrap();
@@ -149,14 +149,11 @@ async fn main(spawner: Spawner) -> ! {
         .await
         .unwrap();
 
-    let certificates = Certificates {
-        // Use self-signed certificates
-        certificate: X509::pem(concat!(include_str!("./certs/certificate.pem"), "\0").as_bytes())
-            .ok(),
-        private_key: X509::pem(concat!(include_str!("./certs/private_key.pem"), "\0").as_bytes())
-            .ok(),
-        ..Default::default()
-    };
+    let crt =
+        MbedTLSX509Crt::new_no_copy(X509::der(include_bytes!("./certs/certificate.der"))).unwrap();
+    let private_key =
+        PkContext::new(X509::der(include_bytes!("./certs/private_key.der")), None).unwrap();
+    let certificates = Certificates::new().with_certificates(&crt, &private_key);
 
     let mut tls = Tls::new(peripherals.SHA)
         .unwrap()
@@ -167,8 +164,9 @@ async fn main(spawner: Spawner) -> ! {
     loop {
         let tls_acceptor = esp_mbedtls::asynch::TlsAcceptor::new(
             &acceptor,
+            AuthMode::None,
             TlsVersion::Tls1_2,
-            certificates,
+            &certificates,
             tls.reference(),
         );
         match server

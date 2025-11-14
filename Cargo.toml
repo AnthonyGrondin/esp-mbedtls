@@ -24,7 +24,7 @@ opt-level = "z"
 opt-level = 3
 
 [dependencies]
-esp-hal = { version = "=1.0.0-beta.1", optional = true }
+esp-hal = { version = "=1.0.0-rc.0", optional = true }
 esp-backtrace = { version = "0.16", optional = true, features = [
     "panic-handler",
     "println",
@@ -44,7 +44,7 @@ embassy-net = { version = "0.6.0", features = [
     "medium-ethernet",
 ], optional = true }
 
-esp-wifi = { version = "0.14.0", optional = true, features = [
+esp-wifi = { version = "0.15.0", optional = true, features = [
     "sys-logs",
     "wifi",
 ] }
@@ -138,6 +138,14 @@ esp32c3 = [
     "esp-println?/esp32c3",
     "esp-wifi?/esp32c3",
     "esp-mbedtls/esp32c3",
+]
+esp32c6 = [
+    "esp-hal?/esp32c6",
+    "esp-hal-embassy?/esp32c6",
+    "esp-backtrace?/esp32c6",
+    "esp-println?/esp32c6",
+    "esp-wifi?/esp32c6",
+    "esp-mbedtls/esp32c6",
 ]
 esp32s2 = [
     "esp-hal?/esp32s2",
