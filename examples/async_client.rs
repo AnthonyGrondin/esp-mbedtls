@@ -173,7 +173,7 @@ async fn main(spawner: Spawner) -> ! {
             },
             TlsVersion::Tls1_3,
         ),
-        &certificates,
+        certificates,
         tls.reference(),
     )
     .unwrap();

@@ -361,6 +361,8 @@ pub struct MbedTLSX509Crt<'d> {
     _t: PhantomData<&'d ()>,
 }
 
+unsafe impl Send for MbedTLSX509Crt<'_> {}
+
 impl MbedTLSX509Crt<'static> {
     /// Parse an X509 certificate into RAM by making a copy
     ///
@@ -498,6 +500,8 @@ impl Drop for MbedTLSX509Crt<'_> {
 #[repr(transparent)]
 pub struct PkContext(NonNull<mbedtls_pk_context>);
 
+unsafe impl Send for PkContext {}
+
 impl PkContext {
     /// Parse an X509 private key into RAM and returns a wrapped pointer if successful.
     ///
@@ -570,7 +574,7 @@ impl Drop for PkContext {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub struct Certificates<'d> {
     /// Trusted CA (Certificate Authority) chain to be used for certificate
     /// verification during the SSL/TLS handshake.
@@ -962,7 +966,7 @@ impl<'a, T> Session<'a, T> {
     pub fn new(
         stream: T,
         config: SessionConfig<'_>,
-        certificates: &'a Certificates<'a>,
+        certificates: Certificates<'a>,
         tls_ref: TlsReference<'a>,
     ) -> Result<Self, TlsError> {
         let (drbg_context, ssl_context, ssl_config) = certificates.init_ssl(config)?;
@@ -1265,7 +1269,7 @@ pub mod asynch {
         pub fn new(
             stream: T,
             config: SessionConfig<'_>,
-            certificates: &'a Certificates<'a>,
+            certificates: Certificates<'a>,
             tls_ref: TlsReference<'a>,
         ) -> Result<Self, TlsError> {
             let (drbg_context, ssl_context, ssl_config) = certificates.init_ssl(config)?;

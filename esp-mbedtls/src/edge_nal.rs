@@ -11,7 +11,7 @@ pub struct TlsAcceptor<'d, T> {
     acceptor: T,
     auth_mode: AuthMode,
     min_version: TlsVersion,
-    certificates: &'d Certificates<'d>,
+    certificates: Certificates<'d>,
     tls_ref: TlsReference<'d>,
 }
 
@@ -32,7 +32,7 @@ where
         acceptor: T,
         auth_mode: AuthMode,
         min_version: TlsVersion,
-        certificates: &'d Certificates<'d>,
+        certificates: Certificates<'d>,
         tls_ref: TlsReference<'d>,
     ) -> Self {
         Self {
@@ -86,7 +86,7 @@ pub struct TlsConnector<'d, T> {
     servername: &'d CStr,
     auth_mode: AuthMode,
     min_version: TlsVersion,
-    certificates: &'d Certificates<'d>,
+    certificates: Certificates<'d>,
     tls_ref: TlsReference<'d>,
 }
 
@@ -109,7 +109,7 @@ where
         servername: &'d CStr,
         auth_mode: AuthMode,
         min_version: TlsVersion,
-        certificates: &'d Certificates<'d>,
+        certificates: Certificates<'d>,
         tls_ref: TlsReference<'d>,
     ) -> Self {
         Self {

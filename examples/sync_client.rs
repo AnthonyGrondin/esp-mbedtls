@@ -172,7 +172,7 @@ fn main() -> ! {
             },
             TlsVersion::Tls1_3,
         ),
-        &certificates,
+        certificates,
         tls.reference(),
     )
     .unwrap();

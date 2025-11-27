@@ -177,7 +177,7 @@ fn main() -> ! {
             let mut pos = 0;
 
             let mut session =
-                Session::new(&mut socket, config, &certificates, tls.reference()).unwrap();
+                Session::new(&mut socket, config, certificates, tls.reference()).unwrap();
 
             match session.connect() {
                 Ok(_) => {

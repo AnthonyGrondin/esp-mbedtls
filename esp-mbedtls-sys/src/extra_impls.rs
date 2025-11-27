@@ -55,3 +55,9 @@ impl core::fmt::Debug for crate::bindings::mbedtls_pk_context {
         write!(f, "mbedtls_pk_context {{ .. }}")
     }
 }
+
+impl crate::bindings::mbedtls_x509_crt {
+    pub fn der(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.raw.p, self.raw.len) }
+    }
+}

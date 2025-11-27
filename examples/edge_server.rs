@@ -166,7 +166,7 @@ async fn main(spawner: Spawner) -> ! {
             &acceptor,
             AuthMode::None,
             TlsVersion::Tls1_2,
-            &certificates,
+            certificates,
             tls.reference(),
         );
         match server

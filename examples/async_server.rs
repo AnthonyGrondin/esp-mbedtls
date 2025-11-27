@@ -183,8 +183,7 @@ async fn main(spawner: Spawner) -> ! {
 
         let mut buffer = [0u8; 1024];
         let mut pos = 0;
-        let mut session =
-            Session::new(&mut socket, config, &certificates, tls.reference()).unwrap();
+        let mut session = Session::new(&mut socket, config, certificates, tls.reference()).unwrap();
 
         println!("Start tls connect");
         match session.connect().await {
