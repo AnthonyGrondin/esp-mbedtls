@@ -18,8 +18,9 @@ use crate::sys::{
     mbedtls_ssl_config_free, mbedtls_ssl_config_init, mbedtls_ssl_context, mbedtls_ssl_free,
     mbedtls_ssl_init, mbedtls_ssl_protocol_version,
     mbedtls_ssl_protocol_version_MBEDTLS_SSL_VERSION_TLS1_2,
-    mbedtls_ssl_protocol_version_MBEDTLS_SSL_VERSION_TLS1_3, mbedtls_x509_crt,
-    mbedtls_x509_crt_free, mbedtls_x509_crt_init,
+    mbedtls_ssl_protocol_version_MBEDTLS_SSL_VERSION_TLS1_3, mbedtls_ssl_session,
+    mbedtls_ssl_session_free, mbedtls_ssl_session_init, mbedtls_x509_crt, mbedtls_x509_crt_free,
+    mbedtls_x509_crt_init,
 };
 
 use rand_core::CryptoRng;
@@ -228,6 +229,20 @@ impl MInit for mbedtls_ssl_config {
     fn deinit(&mut self) {
         unsafe {
             mbedtls_ssl_config_free(self);
+        }
+    }
+}
+
+impl MInit for mbedtls_ssl_session {
+    fn init(&mut self) {
+        unsafe {
+            mbedtls_ssl_session_init(self);
+        }
+    }
+
+    fn deinit(&mut self) {
+        unsafe {
+            mbedtls_ssl_session_free(self);
         }
     }
 }

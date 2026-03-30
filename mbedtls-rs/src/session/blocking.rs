@@ -4,7 +4,7 @@ use io::{ErrorType, Read, Write};
 
 use crate::sys::*;
 
-use super::{SessionConfig, SessionError, SessionState, TlsReference};
+use super::{SavedSession, SessionConfig, SessionError, SessionState, TlsReference};
 
 /// Re-export of the `embedded-io` crate so that users don't have to explicitly depend on it
 /// to use e.g. `write_all` or `read_exact`.
@@ -73,18 +73,24 @@ where
         Ok(())
     }
 
-    /// Negotiate the TLS connection
-    ///
-    /// This function will perform the TLS handshake with the server.
-    ///
-    /// Note that calling it is not mandatory, because the TLS session is anyway
-    /// negotiated during the first read or write operation.
-    pub fn connect(&mut self) -> Result<(), SessionError> {
+    fn connect_internal(
+        &mut self,
+        saved_session: Option<&SavedSession>,
+    ) -> Result<(), SessionError> {
         if self.connected {
             return Ok(());
         }
 
         merr!(unsafe { mbedtls_ssl_session_reset(&mut *self.state.ssl_context) })?;
+
+        if let Some(saved_session) = saved_session {
+            merr!(unsafe {
+                mbedtls_ssl_set_session(
+                    &*self.state.ssl_context as *const _ as *mut _,
+                    &*saved_session.mbedtls_session,
+                )
+            })?;
+        }
 
         loop {
             match self.call_mbedtls(|ssl_ctx| unsafe { mbedtls_ssl_handshake(ssl_ctx) }) {
@@ -102,6 +108,26 @@ where
                 }
             }
         }
+    }
+
+    /// Negotiate the TLS connection
+    ///
+    /// This function will perform the TLS handshake with the server.
+    ///
+    /// Note that calling it is not mandatory, because the TLS session is anyway
+    /// negotiated during the first read or write operation.
+    pub fn connect(&mut self) -> Result<(), SessionError> {
+        self.connect_internal(None)
+    }
+
+    /// Negotiate the TLS connection attempting to reuse a previously captured session.
+    ///
+    /// Use [`Session::save`] to get a copy of the session to use here  
+    pub fn connect_with_session(
+        &mut self,
+        saved_session: &SavedSession,
+    ) -> Result<(), SessionError> {
+        self.connect_internal(Some(saved_session))
     }
 
     /// Get the TLS verification details
@@ -285,6 +311,16 @@ where
         let session = (ctx as *mut Self).as_mut().unwrap();
 
         session.bio_send(core::slice::from_raw_parts(buf as *const _, len))
+    }
+
+    /// Capture the negotiated MbedTLS session for possible reuse.
+    pub fn save(&self) -> Result<SavedSession, SessionError> {
+        let mut mbedtls_session: super::super::MBox<mbedtls_ssl_session> =
+            super::super::MBox::new().ok_or(MbedtlsError::new(MBEDTLS_ERR_SSL_ALLOC_FAILED))?;
+
+        merr!(unsafe { mbedtls_ssl_get_session(&*self.state.ssl_context, &mut *mbedtls_session) })?;
+
+        Ok(SavedSession { mbedtls_session })
     }
 }
 

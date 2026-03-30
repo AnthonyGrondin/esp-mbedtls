@@ -10,7 +10,7 @@ use io::{ErrorType, Read, Write};
 use crate::sys::*;
 use crate::{SessionError, TlsReference};
 
-use super::{SessionConfig, SessionState};
+use super::{SavedSession, SessionConfig, SessionState};
 
 /// Re-export of the `embedded-io-async` crate so that users don't have to explicitly depend on it
 /// to use e.g. `write_all` or `read_exact`.
@@ -105,6 +105,22 @@ where
         Ok(())
     }
 
+    async fn connect_internal(
+        &mut self,
+        saved_session: Option<&SavedSession>,
+    ) -> Result<(), SessionError> {
+        if self.connected {
+            return Ok(());
+        }
+
+        MBio::from_session(self).connect(saved_session).await?;
+
+        self.connected = true;
+        self.eof = false;
+
+        Ok(())
+    }
+
     /// Negotiate the TLS connection
     ///
     /// This function will perform the TLS handshake with the server.
@@ -112,16 +128,17 @@ where
     /// Note that calling it is not mandatory, because the TLS session is anyway
     /// negotiated during the first read or write operation, or when splitting the session.
     pub async fn connect(&mut self) -> Result<(), SessionError> {
-        if self.connected {
-            return Ok(());
-        }
+        self.connect_internal(None).await
+    }
 
-        MBio::from_session(self).connect().await?;
-
-        self.connected = true;
-        self.eof = false;
-
-        Ok(())
+    /// Negotiate the TLS connection attempting to reuse a previously captured session.
+    ///
+    /// Use [`Session::save`] to get a copy of the session to use here  
+    pub async fn connect_with_session(
+        &mut self,
+        saved_session: &SavedSession,
+    ) -> Result<(), SessionError> {
+        self.connect_internal(Some(saved_session)).await
     }
 
     /// Split the TLS session into read and write halves
@@ -224,6 +241,16 @@ where
         self.connected = false;
 
         Ok(())
+    }
+
+    /// Capture the negotiated MbedTLS session for possible reuse.
+    pub fn save(&self) -> Result<SavedSession, SessionError> {
+        let mut mbedtls_session: super::super::MBox<mbedtls_ssl_session> =
+            super::super::MBox::new().ok_or(MbedtlsError::new(MBEDTLS_ERR_SSL_ALLOC_FAILED))?;
+
+        merr!(unsafe { mbedtls_ssl_get_session(&*self.state.ssl_context, &mut *mbedtls_session) })?;
+
+        Ok(SavedSession { mbedtls_session })
     }
 }
 
@@ -523,10 +550,19 @@ where
     }
 
     /// Establish the SSL connection
-    async fn connect(&mut self) -> Result<(), SessionError> {
+    async fn connect(&mut self, saved_session: Option<&SavedSession>) -> Result<(), SessionError> {
         debug!("Establishing SSL connection");
 
         merr!(unsafe { mbedtls_ssl_session_reset(self.ssl_context as *const _ as *mut _) })?;
+
+        if let Some(saved_session) = saved_session {
+            merr!(unsafe {
+                mbedtls_ssl_set_session(
+                    self.ssl_context as *const _ as *mut _,
+                    &*saved_session.mbedtls_session,
+                )
+            })?;
+        }
 
         loop {
             match self

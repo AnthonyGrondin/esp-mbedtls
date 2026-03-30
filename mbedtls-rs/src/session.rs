@@ -10,6 +10,11 @@ pub use asynch::*;
 mod asynch;
 pub mod blocking;
 
+/// A reusable TLS session state captured from a connected session.
+pub struct SavedSession {
+    pub(crate) mbedtls_session: MBox<mbedtls_ssl_session>,
+}
+
 /// Certificate verification mode used for a session
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
